@@ -35,6 +35,7 @@ future::plan(multisession)
 
 #Buffer distance
 buff_dist <- 5280/4 # Quarter mile
+#Add buffer distance for rail
 
 #Folder for saving outputs to
 folder_name = "trimet"
@@ -100,6 +101,7 @@ shape_geom = shapes %>%
 
 gtfs_table_names <- names(bus_gtfs)
 
+#This if statement will build a cross reference of date and service ID via calendar files
 if("calendar" %in% gtfs_table_names & "calendar_dates" %in% gtfs_table_names){
   calendar_reg<- bus_gtfs$calendar %>% 
     mutate(date_range = map2(start_date,end_date,function(sd,ed){
@@ -178,6 +180,7 @@ if("calendar" %in% gtfs_table_names & "calendar_dates" %in% gtfs_table_names){
     )
 }
 
+#Trips counts by shape and day type
 dt_trip_counts <- trips %>%
   filter(service_id %in% calendar$service_id) %>%
   left_join(calendar) %>%
@@ -196,6 +199,7 @@ dt_trip_counts <- trips %>%
   mutate(across(contains("num_trips"),replace_na,0)) %>%
   select(route_id:shape_id,num_trips_Weekday,num_trips_Saturday,num_trips_Sunday)
 
+#Shape pattern metadata
 shape_pattern_ref = trips %>%
   distinct(route_id,direction_id,shape_id) %>%
   left_join(routes %>% select(route_id,route_short_name,route_long_name)) %>%
@@ -229,6 +233,7 @@ shape_pattern_ref = trips %>%
     )
   )) 
 
+#Reference of unique stops served by shape ID
 stop_shp_ref <- stop_dirs %>%
   distinct(shape_id,stop_id)
 
@@ -257,7 +262,9 @@ sub_block_groups <- state_county_pairs %>%
   mutate(bg_geoms = pmap(.l = list(STATEFP, COUNTYFP),
                          .f = function(state_fips, county_fips){
                            
-                           block_groups(state = state_fips, county = county_fips, year = 2020)
+                           block_groups(state = state_fips, 
+                                        county = county_fips, 
+                                        year = 2020)
                            
                          })) %>%
   select(bg_geoms) %>%
@@ -310,7 +317,7 @@ stop_walksheds <- stop_walksheds_queried %>%
 #Diagnostic map
 # leaflet() %>%
 #   addProviderTiles("CartoDB.Positron") %>%
-#   addPolygons(data = stop_walksheds)
+#   addPolygons(data = stop_walksheds %>% st_transform(coord_global))
 
 # Calculating Transit Supply ----------------
 
@@ -327,7 +334,7 @@ with_progress({
         #Progress indicator
         p()
         
-        # x=500
+        # x=750
         # geom <- sub_block_groups$geometry[[x]]
         
         #Block group geometry
@@ -335,7 +342,7 @@ with_progress({
         
         #Walksheds intersecting with given block group
         sub_walksheds <- stop_walksheds %>%
-          filter(st_intersects(.,bg_geom,sparse = FALSE))
+          filter(st_intersects(.,bg_geom,sparse = FALSE)) 
         
         if(nrow(sub_walksheds)>0){
           
@@ -345,31 +352,45 @@ with_progress({
             distinct(shape_id) %>%
             pull(shape_id)
           
+          #Get number/area of stops served by each shape?
+          #Bryan to revise
+          
           #Shape metadata reference for affected shape IDs
           sub_shape_pattern_ref <- shape_pattern_ref %>%
             filter(shape_id %in% sub_shape_ids)
           
-          #Sum trips for affected shapes by route and direction, and then average across direction
+          #Sum trips for affected shapes by route and direction
           sub_route_trips <- sub_shape_pattern_ref %>%
             group_by(route_id,direction_id) %>%
-            summarise(across(contains("num_trips"),sum)) %>%
-            group_by(route_id) %>%
-            summarise(across(contains("num_trips"),mean))
+            summarise(across(contains("num_trips"),sum))
           
-          unioned_walkshed <- sub_walksheds %>%
-            st_union()
+          #Cut walksheds to block group geometry
+          int_walksheds <- sub_walksheds %>%
+            st_intersection(bg_geom) %>%
+            mutate(cut_area_acres = as.numeric(st_area(geometry))*2.29568e-5)
           
-          cut_walkshed <- unioned_walkshed %>%
-            st_intersection(bg_geom)
+          #Create cross reference of unique stops and directions by route
+          rt_stop_ref <- stop_dirs %>%
+            filter(shape_id %in% sub_shape_ids,
+                   stop_id %in% int_walksheds$stop_id) %>%
+            distinct(route_id,stop_id,direction_id)
           
-          cut_walkshed_area <- as.numeric(st_area(cut_walkshed))*2.29568e-5
+          #Calculate total walkshed area by route and direction (in acres)
+          route_walkshed_areas <- int_walksheds %>%
+            st_drop_geometry() %>%
+            left_join(rt_stop_ref) %>%
+            group_by(route_id,direction_id) %>%
+            summarise(stop_area_acres = sum(cut_area_acres))
           
+          #Whole area of block group (in acres)
           whole_bg_area <- as.numeric(st_area(bg_geom))*2.29568e-5
           
+          #Calculate transit supply
           transit_supply_raw_calc <- sub_route_trips %>%
             pivot_longer(contains("num_trips")) %>%
             mutate(day_cat = str_replace(name,"num_trips_","")) %>%
-            mutate(transit_supply_raw = value * cut_walkshed_area) %>%
+            left_join(route_walkshed_areas) %>%
+            mutate(transit_supply_raw = value * stop_area_acres) %>%
             group_by(day_cat) %>%
             summarise(transit_supply_raw = sum(transit_supply_raw)/whole_bg_area) 
           
@@ -397,15 +418,19 @@ transit_supply_results <- bgs_with_transit_supply %>%
 
 #Washington County, OR
 
+#Washington county block groups
 wash_co_bgs <- sub_block_groups %>%
   filter(COUNTYFP == "067")
 
+#Washington county stops
 wash_co_stops <- stops %>%
   filter(st_intersects(.,wash_co_bgs %>% st_union(),sparse = FALSE))
 
+#Washington county stop orders
 wash_co_stop_dirs <- stop_shp_ref %>%
   filter(stop_id %in% wash_co_stops$stop_id)
 
+#subset transit supply results to washington county block groups
 transit_supply_results_wash_co <- bgs_with_transit_supply %>%
   filter(GEOID %in% wash_co_bgs$GEOID) %>%
   st_drop_geometry() %>%
@@ -421,6 +446,8 @@ weekday_transit_supply_geom <- wash_co_bgs %>%
   mutate(across(contains("transit_supply"),replace_na,0)) %>%
   st_transform(coord_global)
 
+#Filter shape reference to shape IDs in Washington county
+#Added a route label for mapping
 primary_shape_ref <- shape_pattern_ref %>%
   filter(primary_shape) %>%
   filter(shape_id %in% wash_co_stop_dirs$shape_id) %>%
@@ -430,6 +457,8 @@ primary_shape_ref <- shape_pattern_ref %>%
     TRUE ~ paste0(str_pad(route_short_name,width=3,side="left",pad="0"),": ",route_long_name)
   ))
 
+#Filter shape geometry for mapping
+#Added a route color
 primary_shape_geom <- shape_geom %>%
   filter(shape_id %in% primary_shape_ref$shape_id) %>%
   left_join(primary_shape_ref) %>%
@@ -443,18 +472,22 @@ primary_shape_geom <- shape_geom %>%
   )) %>%
   st_transform(coord_global)
 
+#Color palette for mapping
 supply_score_pal = colorNumeric(
   palette = viridis::magma(10,direction = -1),
   domain = c(0,1)
 )
 
+#Splitting shape geometry by bus and non-bus (i.e. rail)
 bus_route_shapes <- primary_shape_geom %>%
   filter(route_type == 3)
 nonbus_route_shapes <- primary_shape_geom %>%
   filter(route_type != 3)
 
+#Width for visual halo on map
 halo_width = 2
 
+#Map creation
 map_obj <- leaflet() %>%
   addProviderTiles("CartoDB.Positron") %>%
   addMapPane("bg_scores", zIndex = 410) %>%
