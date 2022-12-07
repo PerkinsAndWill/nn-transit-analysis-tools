@@ -61,7 +61,7 @@ full_output_folder = paste0("data/output/transit-supply-analysis/",folder_name)
 # NN's Valhalla instance, no need to change
 nn_valhalla_hostname <- "128.199.8.29"
 
-# GTFS Setup ------------
+# GTFS Table Setup ------------
 bus_gtfs = read_gtfs(feed_path)
 
 trips            <- bus_gtfs$trips  
@@ -74,6 +74,7 @@ stops            <- bus_gtfs$stops %>%
            crs = coord_global) %>%
   st_transform(crs = coord_local)
 
+#Stop Orders
 stop_dirs <- stop_times %>% 
   left_join(trips) %>%
   distinct(route_id, direction_id, shape_id, stop_id, stop_sequence) %>% 
@@ -81,6 +82,7 @@ stop_dirs <- stop_times %>%
   left_join(bus_gtfs$stops %>% select(stop_id, stop_name,stop_lon,stop_lat)) %>%
   arrange(route_id,direction_id,shape_id,stop_sequence)
 
+#Shape Geometry
 shape_geom = shapes %>%
   nest(data = any_of(c('shape_pt_lon','shape_pt_lat','shape_pt_sequence','shape_dist_traveled'))) %>%
   mutate(geometry = map(data, function(df){
@@ -195,9 +197,8 @@ dt_trip_counts <- trips %>%
   select(route_id:shape_id,num_trips_Weekday,num_trips_Saturday,num_trips_Sunday)
 
 shape_pattern_ref = trips %>%
-  filter(route_id %in% sub_routes$route_id) %>%
   distinct(route_id,direction_id,shape_id) %>%
-  left_join(sub_routes %>% select(route_id,route_short_name,route_long_name)) %>%
+  left_join(routes %>% select(route_id,route_short_name,route_long_name)) %>%
   left_join(stop_dirs %>% 
               group_by(route_id,direction_id,shape_id) %>%
               summarise(num_stops = n())) %>%
@@ -231,23 +232,27 @@ shape_pattern_ref = trips %>%
 stop_shp_ref <- stop_dirs %>%
   distinct(shape_id,stop_id)
 
-
 # Defining extent of census geography --------------
 
-shape_geom_hull <- shape_geom %>%
+#Create a buffer of all shapes, union to select affected counties
+shape_geom_buff_union <- shape_geom %>%
   st_buffer(buff_dist) %>%
   st_union() 
 
+#Download all US counties
 us_counties <- counties(year = 2020)
 
+#Subset US counties where shape above overlaps
 sub_us_counties <- us_counties %>%
   st_transform(coord_local) %>%
-  filter(st_intersects(., shape_geom_hull, sparse = FALSE))
+  filter(st_intersects(., shape_geom_buff_union, sparse = FALSE))
 
+#State-county ID pairs for querying block group geometry
 state_county_pairs <- sub_us_counties %>%
   st_drop_geometry() %>%
   distinct(STATEFP,COUNTYFP)
 
+#Fetch block group geometries for each county
 sub_block_groups <- state_county_pairs %>%
   mutate(bg_geoms = pmap(.l = list(STATEFP, COUNTYFP),
                          .f = function(state_fips, county_fips){
@@ -262,8 +267,10 @@ sub_block_groups <- state_county_pairs %>%
 
 # Generating Walksheds per Stop ----------
 
+#Buffer distance in kilometers
 buff_dist_km <- buff_dist*0.0003048
 
+#Generate walksheds for each stop (based on user input buffer distance)
 #This step will take a few minutes depending on the number of stops
 with_progress({
   
@@ -292,6 +299,7 @@ with_progress({
                                        }, p = p))
 })
 
+#Clean up queried walksheds into a single SF dataframe
 stop_walksheds <- stop_walksheds_queried %>%
   st_drop_geometry() %>%
   mutate(geometry = map(walkshed_geom,~.x[[1]]) %>% st_sfc(crs=coord_global)) %>%
@@ -299,12 +307,14 @@ stop_walksheds <- stop_walksheds_queried %>%
   st_as_sf() %>%
   st_transform(coord_local)
 
+#Diagnostic map
 # leaflet() %>%
 #   addProviderTiles("CartoDB.Positron") %>%
 #   addPolygons(data = stop_walksheds)
 
 # Calculating Transit Supply ----------------
 
+#Calculate transit supply metric for each block group in the affected counties
 with_progress({
   
   p <- progressor(steps = nrow(sub_block_groups))
@@ -314,26 +324,32 @@ with_progress({
       .l = list(geometry),
       .f = function(geom, p){
         
+        #Progress indicator
         p()
         
         # x=500
         # geom <- sub_block_groups$geometry[[x]]
         
+        #Block group geometry
         bg_geom <- geom %>% st_sfc(crs=coord_local)
         
+        #Walksheds intersecting with given block group
         sub_walksheds <- stop_walksheds %>%
           filter(st_intersects(.,bg_geom,sparse = FALSE))
         
         if(nrow(sub_walksheds)>0){
           
+          #Get unique shape IDs serving stops affected
           sub_shape_ids <- stop_shp_ref %>%
             filter(stop_id %in% sub_walksheds$stop_id) %>%
             distinct(shape_id) %>%
             pull(shape_id)
           
+          #Shape metadata reference for affected shape IDs
           sub_shape_pattern_ref <- shape_pattern_ref %>%
             filter(shape_id %in% sub_shape_ids)
           
+          #Sum trips for affected shapes by route and direction, and then average across direction
           sub_route_trips <- sub_shape_pattern_ref %>%
             group_by(route_id,direction_id) %>%
             summarise(across(contains("num_trips"),sum)) %>%
@@ -360,6 +376,7 @@ with_progress({
           return(transit_supply_raw_calc)
           
         }else{
+          #If no intersecting walksheds, return empty tibble
           return(tibble())
         }
         
@@ -367,12 +384,31 @@ with_progress({
   
 })
 
+transit_supply_results <- bgs_with_transit_supply %>%
+  st_drop_geometry() %>%
+  select(GEOID,transit_supply_raw) %>%
+  unnest(transit_supply_raw) %>%
+  group_by(day_cat) %>%
+  mutate(transit_supply_score_by_day_cat = percent_rank(transit_supply_raw)) %>%
+  ungroup() %>%
+  mutate(transit_supply_score_across_day_cat = percent_rank(transit_supply_raw))
+
+#Example Map generation ------------
+
+#Washington County, OR
+
 wash_co_bgs <- sub_block_groups %>%
   filter(COUNTYFP == "067")
 
-transit_supply_results <- bgs_with_transit_supply %>%
-  st_drop_geometry() %>%
+wash_co_stops <- stops %>%
+  filter(st_intersects(.,wash_co_bgs %>% st_union(),sparse = FALSE))
+
+wash_co_stop_dirs <- stop_shp_ref %>%
+  filter(stop_id %in% wash_co_stops$stop_id)
+
+transit_supply_results_wash_co <- bgs_with_transit_supply %>%
   filter(GEOID %in% wash_co_bgs$GEOID) %>%
+  st_drop_geometry() %>%
   select(GEOID,transit_supply_raw) %>%
   unnest(transit_supply_raw) %>%
   group_by(day_cat) %>%
@@ -381,8 +417,30 @@ transit_supply_results <- bgs_with_transit_supply %>%
   mutate(transit_supply_score_across_day_cat = percent_rank(transit_supply_raw))
 
 weekday_transit_supply_geom <- wash_co_bgs %>%
-  left_join(transit_supply_results %>% filter(day_cat == "Weekday")) %>%
+  left_join(transit_supply_results_wash_co %>% filter(day_cat == "Weekday")) %>%
   mutate(across(contains("transit_supply"),replace_na,0)) %>%
+  st_transform(coord_global)
+
+primary_shape_ref <- shape_pattern_ref %>%
+  filter(primary_shape) %>%
+  filter(shape_id %in% wash_co_stop_dirs$shape_id) %>%
+  left_join(routes %>% select(route_id,route_color,route_type)) %>%
+  mutate(route_label = case_when(
+    str_length(route_short_name) == 0 ~ route_long_name,
+    TRUE ~ paste0(str_pad(route_short_name,width=3,side="left",pad="0"),": ",route_long_name)
+  ))
+
+primary_shape_geom <- shape_geom %>%
+  filter(shape_id %in% primary_shape_ref$shape_id) %>%
+  left_join(primary_shape_ref) %>%
+  mutate(route_color = case_when(
+    str_length(route_color)==0 ~ "#1273b0",
+    TRUE ~ paste0("#",route_color)
+  )) %>%
+  mutate(line_weight = case_when(
+    route_type == 3 ~ 3,
+    TRUE ~ 5
+  )) %>%
   st_transform(coord_global)
 
 supply_score_pal = colorNumeric(
@@ -390,15 +448,52 @@ supply_score_pal = colorNumeric(
   domain = c(0,1)
 )
 
+bus_route_shapes <- primary_shape_geom %>%
+  filter(route_type == 3)
+nonbus_route_shapes <- primary_shape_geom %>%
+  filter(route_type != 3)
+
+halo_width = 2
+
 map_obj <- leaflet() %>%
   addProviderTiles("CartoDB.Positron") %>%
+  addMapPane("bg_scores", zIndex = 410) %>%
+  addMapPane("bus_routes_halo", zIndex = 419) %>%
+  addMapPane("bus_routes", zIndex = 420) %>%
+  addMapPane("nonbus_routes_halo", zIndex = 429) %>%
+  addMapPane("nonbus_routes", zIndex = 430) %>%
   addPolygons(data = weekday_transit_supply_geom, color="white", weight=2,
               opacity = 0.8,
               fillColor =~ supply_score_pal(transit_supply_score_across_day_cat),
               fillOpacity = 0.5, label =~ comma(transit_supply_score_across_day_cat,accuracy = 0.001),
-              highlightOptions = highlightOptions(weight = 4, fillOpacity = 0.75)) %>%
+              highlightOptions = highlightOptions(weight = 4, fillOpacity = 0.75),
+              options = pathOptions(pane = "bg_scores")) %>%
+  addPolylines(data = bus_route_shapes, color="white", weight=~line_weight+halo_width,
+               opacity = 0.8, group = "Bus Routes",
+               highlightOptions = highlightOptions(opacity = 1, sendToBack = TRUE),
+               label=~route_label,
+               options = pathOptions(pane="bus_routes_halo")) %>%
+  addPolylines(data = bus_route_shapes, color=~route_color, 
+               weight=~line_weight,
+               opacity = 0.8, group = "Bus Routes",
+               highlightOptions = highlightOptions(opacity = 1, sendToBack = TRUE),
+               label=~route_label,
+               options = pathOptions(pane="bus_routes")) %>%
+  addPolylines(data = nonbus_route_shapes, color="white", weight=~line_weight+halo_width,
+               opacity = 0.8, group = "Non-Bus Routes",
+               highlightOptions = highlightOptions(opacity = 1, sendToBack = TRUE),
+               label=~route_label,
+               options = pathOptions(pane="nonbus_routes_halo")) %>%
+  addPolylines(data = nonbus_route_shapes, color=~route_color, 
+               weight=~line_weight,
+               opacity = 0.8, group = "Non-Bus Routes",
+               highlightOptions = highlightOptions(opacity = 1, sendToBack = TRUE),
+               label=~route_label,
+               options = pathOptions(pane="nonbus_routes")) %>%
   addLegend(position = "topright", pal = supply_score_pal, values = c(0,0.5,1),
-            title = "Weekday<br>Transit<br>Supply<br>Score")
+            title = "Weekday<br>Transit<br>Supply<br>Score") %>%
+  addLayersControl(position = "bottomright",overlayGroups = c("Bus Routes","Non-Bus Routes"),
+                   options = layersControlOptions(collapsed = FALSE))
 
 htmlwidgets::saveWidget(map_obj,file = "docs/transit-supply-example-maps/wash-co-example.html")
 
