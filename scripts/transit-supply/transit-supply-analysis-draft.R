@@ -55,7 +55,9 @@ file_ending = str_replace_all(app_time_period," ","_")
 
 if(!dir.exists("data/output")){dir.create("data/output")}
 if(!dir.exists("data/output/transit-supply-analysis")){dir.create("data/output/transit-supply-analysis")}
-if(!dir.exists(paste0("data/output/transit-supply-analysis/",folder_name))){dir.create(paste0("data/output/transit-supply-analysis/",folder_name))}
+if(!dir.exists(paste0("data/output/transit-supply-analysis/",folder_name))){
+  dir.create(paste0("data/output/transit-supply-analysis/",folder_name))
+}
 
 full_output_folder = paste0("data/output/transit-supply-analysis/",folder_name)
 
@@ -456,6 +458,12 @@ primary_shape_ref <- shape_pattern_ref %>%
     str_length(route_short_name) == 0 ~ route_long_name,
     TRUE ~ paste0(str_pad(route_short_name,width=3,side="left",pad="0"),": ",route_long_name)
   ))
+
+sub_route_ref <- primary_shape_ref %>%
+  distinct(route_id,route_short_name,route_long_name,route_label,route_type) %>%
+  arrange(route_type,route_label)
+
+write_rds(sub_route_ref,paste0(full_output_folder,"/wash_co_route_reference.rds"))
 
 #Filter shape geometry for mapping
 #Added a route color
