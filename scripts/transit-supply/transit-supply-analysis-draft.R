@@ -34,9 +34,9 @@ future::plan(multisession)
 # USER INPUTS ---------------------
 
 #Buffer distance
-buff_dist <- 5280/4 # Quarter mile
+buff_dist_bus <- 5280/4 # Quarter mile
 #Add buffer distance for rail
-
+buff_dist_rail <- 5280/2
 #Folder for saving outputs to
 folder_name = "trimet"
 
@@ -84,6 +84,10 @@ stop_dirs <- stop_times %>%
   left_join(routes %>% select(route_id,route_short_name)) %>% 
   left_join(bus_gtfs$stops %>% select(stop_id, stop_name,stop_lon,stop_lat)) %>%
   arrange(route_id,direction_id,shape_id,stop_sequence)
+
+stop_types <- stop_dirs %>% 
+  left_join(routes %>% select(route_id, route_type)) %>% 
+  select(stop_id, route_type)
 
 #Shape Geometry
 shape_geom = shapes %>%
@@ -243,7 +247,7 @@ stop_shp_ref <- stop_dirs %>%
 
 #Create a buffer of all shapes, union to select affected counties
 shape_geom_buff_union <- shape_geom %>%
-  st_buffer(buff_dist) %>%
+  st_buffer(buff_dist_bus) %>%
   st_union() 
 
 #Download all US counties
@@ -277,18 +281,21 @@ sub_block_groups <- state_county_pairs %>%
 # Generating Walksheds per Stop ----------
 
 #Buffer distance in kilometers
-buff_dist_km <- buff_dist*0.0003048
+buff_dist_bus_km <- buff_dist_bus*0.0003048
+buff_dist_rail_km <- buff_dist_rail*0.0003048
 
 #Generate walksheds for each stop (based on user input buffer distance)
 #This step will take a few minutes depending on the number of stops
+bus_route_type = 3
 with_progress({
   
   p <- progressor(steps = nrow(stops))
   
   stop_walksheds_queried <- stops %>%
-    select(stop_id,stop_name,geometry) %>%
+    left_join(stop_types) %>% 
+    select(stop_id,stop_name,geometry, route_type) %>%
     st_transform(coord_global) %>%
-    mutate(walkshed_geom = future_pmap(.l = list(geometry),
+    mutate(walkshed_geom = future_pmap(.l = list(geometry, route_type),
                                        .f = function(geom, p){
                                          
                                          p()
@@ -296,13 +303,25 @@ with_progress({
                                          pt_geom <- geom %>% st_coordinates() %>%
                                            as_tibble() %>%
                                            rename(lon = X, lat = Y)
-                                         
-                                         iso_result <- isochrone(from = pt_geom,
-                                                                 costing = "pedestrian",
-                                                                 contours = c(buff_dist_km),
-                                                                 metric = "km",
-                                                                 hostname = nn_valhalla_hostname)
-                                         
+                                         if(route_type == 3){
+                                           iso_result <- isochrone(from = pt_geom,
+                                                                   costing = "pedestrian",
+                                                                   contours = c(buff_dist_bus_km),
+                                                                   metric = "km",
+                                                                   hostname = nn_valhalla_hostname)
+                                         }else{
+                                           iso_result <- isochrone(from = pt_geom,
+                                                                   costing = "pedestrian",
+                                                                   contours = c(buff_dist_rail_km),
+                                                                   metric = "km",
+                                                                   hostname = nn_valhalla_hostname)
+                                         }
+                                         # iso_result <- isochrone(from = pt_geom,
+                                         #                         costing = "pedestrian",
+                                         #                         contours = c(buff_dist_bus_km),
+                                         #                         metric = "km",
+                                         #                         hostname = nn_valhalla_hostname)
+                                         # 
                                          return(iso_result$geometry)
                                          
                                        }, p = p))
@@ -316,6 +335,15 @@ stop_walksheds <- stop_walksheds_queried %>%
   st_as_sf() %>%
   st_transform(coord_local)
 
+leaflet() %>% 
+  addTiles() %>% 
+  addPolygons(data = stop_walksheds %>% slice(1) %>% st_transform(coord_global))
+
+leaflet() %>% 
+  addTiles() %>% 
+  addMeasure() %>% 
+  addPolygons(data = stop_walksheds %>% filter(stop_id == 8340) %>% st_transform(coord_global)) %>% 
+  addPolygons(data = stop_walksheds %>% slice(1) %>% st_transform(coord_global))
 #Diagnostic map
 # leaflet() %>%
 #   addProviderTiles("CartoDB.Positron") %>%
