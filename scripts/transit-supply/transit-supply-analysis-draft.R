@@ -87,7 +87,7 @@ stop_dirs <- stop_times %>%
 
 stop_types <- stop_dirs %>% 
   left_join(routes %>% select(route_id, route_type)) %>% 
-  select(stop_id, route_type)
+  distinct(stop_id, route_type)
 
 #Shape Geometry
 shape_geom = shapes %>%
@@ -284,19 +284,22 @@ sub_block_groups <- state_county_pairs %>%
 buff_dist_bus_km <- buff_dist_bus*0.0003048
 buff_dist_rail_km <- buff_dist_rail*0.0003048
 
+rt_stops <- stops %>%
+  left_join(stop_types) %>%
+  filter(!is.na(route_type))
+
 #Generate walksheds for each stop (based on user input buffer distance)
 #This step will take a few minutes depending on the number of stops
 bus_route_type = 3
 with_progress({
   
-  p <- progressor(steps = nrow(stops))
+  p <- progressor(steps = nrow(rt_stops))
   
-  stop_walksheds_queried <- stops %>%
-    left_join(stop_types) %>% 
+  stop_walksheds_queried <- rt_stops %>%
     select(stop_id,stop_name,geometry, route_type) %>%
     st_transform(coord_global) %>%
     mutate(walkshed_geom = future_pmap(.l = list(geometry, route_type),
-                                       .f = function(geom, p){
+                                       .f = function(geom, route_type, p){
                                          
                                          p()
                                          
@@ -335,15 +338,16 @@ stop_walksheds <- stop_walksheds_queried %>%
   st_as_sf() %>%
   st_transform(coord_local)
 
-leaflet() %>% 
-  addTiles() %>% 
-  addPolygons(data = stop_walksheds %>% slice(1) %>% st_transform(coord_global))
-
-leaflet() %>% 
-  addTiles() %>% 
-  addMeasure() %>% 
-  addPolygons(data = stop_walksheds %>% filter(stop_id == 8340) %>% st_transform(coord_global)) %>% 
-  addPolygons(data = stop_walksheds %>% slice(1) %>% st_transform(coord_global))
+#Diagnostic maps
+# leaflet() %>% 
+#   addTiles() %>% 
+#   addPolygons(data = stop_walksheds %>% slice(1) %>% st_transform(coord_global))
+# 
+# leaflet() %>% 
+#   addTiles() %>% 
+#   addMeasure() %>% 
+#   addPolygons(data = stop_walksheds %>% filter(stop_id == 8340) %>% st_transform(coord_global)) %>% 
+#   addPolygons(data = stop_walksheds %>% slice(1) %>% st_transform(coord_global))
 #Diagnostic map
 # leaflet() %>%
 #   addProviderTiles("CartoDB.Positron") %>%
@@ -475,6 +479,8 @@ weekday_transit_supply_geom <- wash_co_bgs %>%
   left_join(transit_supply_results_wash_co %>% filter(day_cat == "Weekday")) %>%
   mutate(across(contains("transit_supply"),replace_na,0)) %>%
   st_transform(coord_global)
+
+# write_sf(weekday_transit_supply_geom,"G:/Current/WASHINGTON_CO_OR_Transit_Study_2020_1005/Analysis/z_Original/weekday-transit-supply.geojson")
 
 #Filter shape reference to shape IDs in Washington county
 #Added a route label for mapping
