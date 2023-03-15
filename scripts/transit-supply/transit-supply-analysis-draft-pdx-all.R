@@ -655,15 +655,17 @@ transit_supply_results <- hex_bins_with_transit_supply %>%
   st_drop_geometry() %>%
   select(hex_id,transit_supply_raw) %>%
   unnest(transit_supply_raw) %>%
-  group_by(day_cat) %>%
-  mutate(transit_supply_score_by_day_cat = percent_rank(transit_supply_raw)) %>%
+  group_by(hex_id) %>%
+  summarise(transit_supply_raw = (5/7)*transit_supply_raw[day_cat == "Weekday"] +
+              (1/7)*transit_supply_raw[day_cat == "Saturday"] +
+              (1/7)*transit_supply_raw[day_cat == "Sunday"]) %>%
   ungroup() %>%
-  mutate(transit_supply_score_across_day_cat = percent_rank(transit_supply_raw))
+  mutate(transit_supply_score = percent_rank(transit_supply_raw))
 
 ## Example Map generation ------------
 
-weekday_transit_supply_geom <- hex_grid %>%
-  left_join(transit_supply_results %>% filter(day_cat == "Weekday")) %>%
+transit_supply_geom <- hex_grid %>%
+  left_join(transit_supply_results) %>%
   mutate(across(contains("transit_supply"),replace_na,0)) %>%
   st_transform(coord_global)
 
@@ -705,10 +707,10 @@ map_obj <- leaflet() %>%
   addMapPane("bus_routes", zIndex = 420) %>%
   addMapPane("nonbus_routes_halo", zIndex = 429) %>%
   addMapPane("nonbus_routes", zIndex = 430) %>%
-  addPolygons(data = weekday_transit_supply_geom, color="white", weight=2,
+  addPolygons(data = transit_supply_geom, color="white", weight=2,
               opacity = 0.8,
-              fillColor =~ supply_score_pal(transit_supply_score_across_day_cat),
-              fillOpacity = 0.5, label =~ comma(transit_supply_score_across_day_cat,accuracy = 0.001),
+              fillColor =~ supply_score_pal(transit_supply_score),
+              fillOpacity = 0.5, label =~ comma(transit_supply_score,accuracy = 0.001),
               highlightOptions = highlightOptions(weight = 4, fillOpacity = 0.75),
               options = pathOptions(pane = "bg_scores")) %>%
   addPolylines(data = bus_route_shapes, color="white", weight=~line_weight+halo_width,
@@ -734,7 +736,7 @@ map_obj <- leaflet() %>%
                label=~route_label,
                options = pathOptions(pane="nonbus_routes")) %>%
   addLegend(position = "topright", pal = supply_score_pal, values = c(0,0.5,1),
-            title = "Weekday<br>Transit<br>Supply<br>Score") %>%
+            title = "Transit<br>Supply<br>Score") %>%
   addLayersControl(position = "bottomright",overlayGroups = c("Bus Routes","Non-Bus Routes"),
                    options = layersControlOptions(collapsed = FALSE))
 
