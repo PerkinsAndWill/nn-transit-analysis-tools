@@ -53,8 +53,8 @@ file_ending = str_replace_all(app_time_period," ","_")
 
 # Project Setup -----------
 
-if(!dir.exists("data/output")){dir.create("data/output")}
-if(!dir.exists("data/output/transit-supply-analysis")){dir.create("data/output/transit-supply-analysis")}
+if(!dir.exists("data/output")){dir.create("data/output",  recursive = TRUE)}
+if(!dir.exists("data/output/transit-supply-analysis")){dir.create("data/output/transit-supply-analysis",  recursive = TRUE)}
 if(!dir.exists(paste0("data/output/transit-supply-analysis/",folder_name))){
   dir.create(paste0("data/output/transit-supply-analysis/",folder_name))
 }
